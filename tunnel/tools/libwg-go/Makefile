@@ -19,10 +19,15 @@ export CGO_LDFLAGS := $(CLANG_FLAGS) $(patsubst -Wl$(comma)--build-id=%,-Wl$(com
 export GOARCH := $(NDK_GO_ARCH_MAP_$(ANDROID_ARCH_NAME))
 export GOOS := android
 export CGO_ENABLED := 1
+GO ?= go
 
 default: $(DESTDIR)/libwg-go.so
 
-$(DESTDIR)/libwg-go.so: go.mod
-	go build -tags linux -ldflags="-checklinkname=0 -X golang.zx2c4.com/wireguard/ipc.socketDirectory=/data/data/$(ANDROID_PACKAGE_NAME)/cache/wireguard -buildid=" -v -trimpath -buildvcs=false -o "$@" -buildmode c-shared
+GO_SOURCES := $(wildcard *.go)
+
+$(DESTDIR)/libwg-go.so: FORCE go.mod $(GO_SOURCES)
+	$(GO) build -tags linux -ldflags="-checklinkname=0 -X golang.zx2c4.com/wireguard/ipc.socketDirectory=/data/data/$(ANDROID_PACKAGE_NAME)/cache/wireguard -buildid=" -v -trimpath -buildvcs=false -o "$@" -buildmode c-shared
+
+FORCE:
 
 .DELETE_ON_ERROR:

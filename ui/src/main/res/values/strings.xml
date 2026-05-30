@@ -298,6 +298,9 @@
     <string name="turn_watchdog_timeout_hint">0=disabled, ≥5 sec</string>
     <string name="turn_streams_per_cred">Streams per credentials</string>
     <string name="turn_streams_per_cred_hint">1-16 (default 4)</string>
+    <string name="turn_wrap">WRAP obfuscation</string>
+    <string name="turn_wrap_key">WRAP key</string>
+    <string name="turn_wrap_key_hint">64 hex characters</string>
     <string name="captcha_title">Verify You Are Human</string>
     <string name="captcha_loading">Loading captcha…</string>
     <string name="captcha_error">Failed to solve captcha. Please try again.</string>

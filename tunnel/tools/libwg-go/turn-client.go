@@ -84,6 +84,14 @@ type stream struct {
 	sessionID []byte
 	cert      *tls.Certificate
 	watchdogTimeout int
+	wrapKey []byte
+	wgToStreamCount atomic.Uint64
+	wgToDtlsCount atomic.Uint64
+	dtlsToWgCount atomic.Uint64
+	dtlsToRelayCount atomic.Uint64
+	relayToDtlsCount atomic.Uint64
+	wgToRelayCount atomic.Uint64
+	relayToWgCount atomic.Uint64
 }
 
 const iPacketBuffMaxSize = 2048;
@@ -103,6 +111,10 @@ var (
 	noDtlsTxDropCount atomic.Uint64      // Drops in NoDTLS TX
 	noDtlsRxErrorCount atomic.Uint64     // Errors in NoDTLS RX
 )
+
+func shouldLogPacket(count uint64) bool {
+	return count <= 10 || count%50 == 0
+}
 
 func (s *stream) run(link string, peer *net.UDPAddr, udp bool, okchan chan<- struct{}, turnIp string, turnPort int, peerType string) {
 	for {
@@ -223,13 +235,16 @@ func (s *stream) runNoDTLS(ctx context.Context, relayConn net.PacketConn, peer *
 			select {
 			case <-sCtx.Done(): return
 			case b := <-s.in:
-                _, err := relayConn.WriteTo(b, peer)
+				nWritten, err := relayConn.WriteTo(b, peer)
                 packetPool.Put(b[:cap(b)])
 
                 if err != nil {
 					noDtlsTxDropCount.Add(1)
 					turnLog("[STREAM %d] TX error: %v", s.id, err)
 					return
+				}
+				if count := s.wgToRelayCount.Add(1); shouldLogPacket(count) {
+					turnLog("[STREAM %d] WG->TURN direct packet #%d bytes=%d peer=%s", s.id, count, nWritten, peer.String())
 				}
 			}
 		}
@@ -246,6 +261,9 @@ func (s *stream) runNoDTLS(ctx context.Context, relayConn net.PacketConn, peer *
 				turnLog("[STREAM %d] RX error: %v", s.id, err)
 				return
 			}
+			if count := s.relayToWgCount.Add(1); shouldLogPacket(count) {
+				turnLog("[STREAM %d] TURN->WG direct candidate #%d bytes=%d from=%s expected=%s", s.id, count, n, from.String(), peer.String())
+			}
 			if from.String() == peer.String() {
 				addr := s.peer.Load()
 				if addr == nil {
@@ -256,6 +274,9 @@ func (s *stream) runNoDTLS(ctx context.Context, relayConn net.PacketConn, peer *
 					noDtlsRxErrorCount.Add(1)
 					turnLog("[STREAM %d] RX write error: %v", s.id, err)
 					return
+				}
+				if count := s.relayToWgCount.Load(); shouldLogPacket(count) {
+					turnLog("[STREAM %d] TURN->WG direct delivered #%d bytes=%d wgAddr=%s", s.id, count, n, (*addr).String())
 				}
 			}
 		}
@@ -274,6 +295,15 @@ func (s *stream) runDTLS(ctx context.Context, relayConn net.PacketConn, peer *ne
 	defer sCancel()
 
 	var dtlsConn *dtls.Conn
+	var wc *wrapConn
+	if len(s.wrapKey) == wrapKeyLen {
+		var err error
+		wc, err = newWrapConn(s.wrapKey, false)
+		if err != nil {
+			return fmt.Errorf("wrap init failed: %w", err)
+		}
+		turnLog("[STREAM %d] WRAP enabled", s.id)
+	}
 
 	c1, c2 := connutil.AsyncPacketPipe()
 	defer c1.Close()
@@ -301,20 +331,42 @@ func (s *stream) runDTLS(ctx context.Context, relayConn net.PacketConn, peer *ne
 	go func() {
 		defer wg.Done(); defer sCancel()
 		buf := make([]byte, iPacketBuffMaxSize)
+		var wireBuf []byte
+		if wc != nil {
+			wireBuf = make([]byte, wrapMaxWire(iPacketBuffMaxSize))
+		}
 		for {
 			n, _, err := c2.ReadFrom(buf)
 			if err != nil { return }
-			if _, err := relayConn.WriteTo(buf[:n], peer); err != nil {
+			out := buf[:n]
+			if wc != nil {
+				wrapped, err := wc.wrapInto(wireBuf, out)
+				if err != nil {
+					relayTxErrorCount.Add(1)
+					turnLog("[STREAM %d] WRAP failed: %v", s.id, err)
+					return
+				}
+				out = wireBuf[:wrapped]
+			}
+			if _, err := relayConn.WriteTo(out, peer); err != nil {
 				relayTxErrorCount.Add(1)
 				turnLog("[STREAM %d] Relay TX error: %v", s.id, err)
 				return
+			}
+			if count := s.dtlsToRelayCount.Add(1); shouldLogPacket(count) {
+				turnLog("[STREAM %d] DTLS->TURN packet #%d bytes=%d peer=%s", s.id, count, len(out), peer.String())
 			}
 		}
 	}()
 
 	go func() {
 		defer wg.Done(); defer sCancel()
-		buf := make([]byte, iPacketBuffMaxSize)
+		readBufLen := iPacketBuffMaxSize
+		if wc != nil {
+			readBufLen = wrapMaxWire(iPacketBuffMaxSize)
+		}
+		buf := make([]byte, readBufLen)
+		plain := make([]byte, iPacketBuffMaxSize)
 		for {
 			n, from, err := relayConn.ReadFrom(buf)
 			if err != nil {
@@ -322,11 +374,27 @@ func (s *stream) runDTLS(ctx context.Context, relayConn net.PacketConn, peer *ne
 				turnLog("[STREAM %d] Relay RX error: %v", s.id, err)
 				return
 			}
+			if count := s.relayToDtlsCount.Add(1); shouldLogPacket(count) {
+				turnLog("[STREAM %d] TURN->DTLS candidate #%d bytes=%d from=%s expected=%s", s.id, count, n, from.String(), peer.String())
+			}
 			if from.String() == peer.String() {
-				if _, err := c2.WriteTo(buf[:n], peer); err != nil {
+				payload := buf[:n]
+				if wc != nil {
+					unwrapped, err := wc.unwrapPacket(payload, plain)
+					if err != nil {
+						relayRxErrorCount.Add(1)
+						turnLog("[STREAM %d] UNWRAP failed: %v (n=%d)", s.id, err, n)
+						continue
+					}
+					payload = plain[:unwrapped]
+				}
+				if _, err := c2.WriteTo(payload, peer); err != nil {
 					relayTxErrorCount.Add(1)
 					turnLog("[STREAM %d] Relay RX->Pipe error: %v", s.id, err)
 					return
+				}
+				if count := s.relayToDtlsCount.Load(); shouldLogPacket(count) {
+					turnLog("[STREAM %d] TURN->DTLS delivered #%d bytes=%d", s.id, count, len(payload))
 				}
 			}
 		}
@@ -399,13 +467,16 @@ func (s *stream) runDTLS(ctx context.Context, relayConn net.PacketConn, peer *ne
 					return
 				}
 
-				_, err := dtlsConn.Write(b)
+				nWritten, err := dtlsConn.Write(b)
 				packetPool.Put(b[:cap(b)])
 
 				if err != nil {
 					dtlsTxDropCount.Add(1)
 					turnLog("[STREAM %d] TX error: %v", s.id, err)
 					return
+				}
+				if count := s.wgToDtlsCount.Add(1); shouldLogPacket(count) {
+					turnLog("[STREAM %d] WG->DTLS packet #%d bytes=%d", s.id, count, nWritten)
 				}
 			}
 		}
@@ -429,6 +500,9 @@ func (s *stream) runDTLS(ctx context.Context, relayConn net.PacketConn, peer *ne
 					turnLog("[STREAM %d] RX write error: %v", s.id, err)
 					return
 				}
+				if count := s.dtlsToWgCount.Add(1); shouldLogPacket(count) {
+					turnLog("[STREAM %d] DTLS->WG packet #%d bytes=%d wgAddr=%s", s.id, count, n, (*last).String())
+				}
 			}
 		}
 	}()
@@ -443,7 +517,7 @@ var turnMutex sync.Mutex
 // Global credentials function for mode selection (set by wgTurnProxyStart)
 var globalGetCreds getCredsFunc
 //export wgTurnProxyStart
-func wgTurnProxyStart(peerAddrC *C.char, vklinkC *C.char, modeC *C.char, n C.int, udp C.int, listenAddrC *C.char, turnIpC *C.char, turnPortC C.int, peerTypeC *C.char, streamsPerCredC C.int, watchdogTimeoutC C.int, networkHandleC C.longlong) int32 {
+func wgTurnProxyStart(peerAddrC *C.char, vklinkC *C.char, modeC *C.char, n C.int, udp C.int, listenAddrC *C.char, turnIpC *C.char, turnPortC C.int, peerTypeC *C.char, streamsPerCredC C.int, watchdogTimeoutC C.int, wrapKeyC *C.char, networkHandleC C.longlong) int32 {
 	// Force initialization of resolver and HTTP client with current environment
 	wgNotifyNetworkChange()
 
@@ -466,9 +540,19 @@ func wgTurnProxyStart(peerAddrC *C.char, vklinkC *C.char, modeC *C.char, n C.int
 	peerType := C.GoString(peerTypeC)
 	streamsPerCred = int(streamsPerCredC)
 	watchdogTimeout := int(watchdogTimeoutC)
+	wrapKeyHex := C.GoString(wrapKeyC)
 	networkHandle := int64(networkHandleC)
+	wrapKey, err := decodeWrapKey(wrapKeyHex != "", wrapKeyHex)
+	if err != nil {
+		turnLog("[PROXY] Invalid WRAP key: %v", err)
+		return -1
+	}
+	if len(wrapKey) == wrapKeyLen && peerType == "wireguard" {
+		turnLog("[PROXY] WRAP requires DTLS peer type")
+		return -1
+	}
 
-	turnLog("[PROXY] Hub starting on %s (streams=%d, mode=%s, peerType=%s, streamsPerCred=%d, watchdogTimeout=%d, networkHandle=%d)", listenAddr, int(n), mode, peerType, streamsPerCred, watchdogTimeout, networkHandle)
+	turnLog("[PROXY] Hub starting on %s (streams=%d, mode=%s, peerType=%s, streamsPerCred=%d, watchdogTimeout=%d, wrap=%t, wrapKeyFp=%s, networkHandle=%d)", listenAddr, int(n), mode, peerType, streamsPerCred, watchdogTimeout, len(wrapKey) == wrapKeyLen, wrapKeyFingerprint(wrapKey), networkHandle)
 	turnMutex.Lock()
 	if currentTurnCancel != nil { currentTurnCancel() }
 	ctx, cancel := context.WithCancel(context.Background())
@@ -545,7 +629,7 @@ func wgTurnProxyStart(peerAddrC *C.char, vklinkC *C.char, modeC *C.char, n C.int
 	ok := make(chan struct{}, int(n))
 	streams := make([]*stream, int(n))
 	for i := 0; i < int(n); i++ {
-		streams[i] = &stream{ctx: ctx, id: i, in: make(chan []byte, 512), out: lc, sessionID: sessionID, cert: &cert, watchdogTimeout: watchdogTimeout}
+		streams[i] = &stream{ctx: ctx, id: i, in: make(chan []byte, 512), out: lc, sessionID: sessionID, cert: &cert, watchdogTimeout: watchdogTimeout, wrapKey: wrapKey}
 		go streams[i].run(link, peer, udp != 0, ok, turnIp, turnPort, peerType)
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -584,8 +668,11 @@ func wgTurnProxyStart(peerAddrC *C.char, vklinkC *C.char, modeC *C.char, n C.int
 
 			select {
 			case s.in <- b[:nRead]:
-				// Packet queued successfully
+				if count := s.wgToStreamCount.Add(1); shouldLogPacket(count) {
+					turnLog("[PROXY] WG->STREAM stream=%d packet #%d bytes=%d wgAddr=%s", s.id, count, nRead, addr.String())
+				}
 			default:
+				turnLog("[PROXY] WG->STREAM drop stream=%d bytes=%d reason=input_queue_full", s.id, nRead)
                 packetPool.Put(b[:cap(b)])
 			}
 		}

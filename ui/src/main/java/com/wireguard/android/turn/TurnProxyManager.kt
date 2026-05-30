@@ -198,7 +198,7 @@ class TurnProxyManager(private val context: Context) {
 
                 val networkHandle = lastKnownNetwork?.getNetworkHandle() ?: 0L
                 val networkType = getNetworkTypeString(lastKnownNetwork)
-                Log.d(TAG, "Starting TURN proxy for $tunnelName with network: $lastKnownNetwork (type=$networkType, handle=$networkHandle)")
+                Log.d(TAG, "Starting TURN proxy for $tunnelName with network: $lastKnownNetwork (type=$networkType, handle=$networkHandle, peerType=${settings.peerType}, wrapKeySet=${settings.wrapKey.isNotBlank()})")
 
                 val ret = TurnBackend.wgTurnProxyStart(
                     settings.peer, settings.vkLink, settings.mode, settings.streams,
@@ -209,6 +209,7 @@ class TurnProxyManager(private val context: Context) {
                     settings.peerType,
                     settings.streamsPerCred,
                     settings.watchdogTimeout,
+                    settings.wrapKey,
                     networkHandle
                 )
 

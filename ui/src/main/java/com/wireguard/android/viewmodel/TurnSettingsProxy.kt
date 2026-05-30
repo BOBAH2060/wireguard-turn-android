@@ -84,6 +84,20 @@ class TurnSettingsProxy : BaseObservable, Parcelable {
         }
 
     @get:Bindable
+    var wrapEnabled: Boolean = false
+        set(value) {
+            field = value
+            notifyPropertyChanged(BR.wrapEnabled)
+        }
+
+    @get:Bindable
+    var wrapKey: String = ""
+        set(value) {
+            field = value
+            notifyPropertyChanged(BR.wrapKey)
+        }
+
+    @get:Bindable
     var peerType: String = "proxy_v2"
         set(value) {
             field = value
@@ -115,6 +129,8 @@ class TurnSettingsProxy : BaseObservable, Parcelable {
         turnIp = parcel.readString() ?: ""
         turnPort = parcel.readString() ?: ""
         watchdogTimeout = parcel.readString() ?: ""
+        wrapEnabled = parcel.readInt() != 0
+        wrapKey = parcel.readString() ?: ""
         peerType = parcel.readString() ?: "proxy_v2"
         streamsPerCred = parcel.readString() ?: ""
         advancedExpanded = parcel.readInt() != 0
@@ -134,6 +150,8 @@ class TurnSettingsProxy : BaseObservable, Parcelable {
             turnIp = other.turnIp
             turnPort = if (other.turnPort > 0) other.turnPort.toString() else ""
             watchdogTimeout = if (other.watchdogTimeout > 0) other.watchdogTimeout.toString() else ""
+            wrapEnabled = other.wrapKey.isNotBlank()
+            wrapKey = other.wrapKey
             peerType = other.peerType
             streamsPerCred = other.streamsPerCred.toString()
         }
@@ -152,6 +170,8 @@ class TurnSettingsProxy : BaseObservable, Parcelable {
         dest.writeString(turnIp)
         dest.writeString(turnPort)
         dest.writeString(watchdogTimeout)
+        dest.writeInt(if (wrapEnabled) 1 else 0)
+        dest.writeString(wrapKey)
         dest.writeString(peerType)
         dest.writeString(streamsPerCred)
         dest.writeInt(if (advancedExpanded) 1 else 0)
@@ -180,6 +200,14 @@ class TurnSettingsProxy : BaseObservable, Parcelable {
 
             if (watchdogTimeout.isNotEmpty() && parsedWatchdogTimeout > 0 && parsedWatchdogTimeout < 5) {
                 throw BadConfigException(BadConfigException.Section.INTERFACE, BadConfigException.Location.TOP_LEVEL, BadConfigException.Reason.INVALID_VALUE, watchdogTimeout)
+            }
+            if (wrapEnabled) {
+                if (peerType == "wireguard") {
+                    throw BadConfigException(BadConfigException.Section.INTERFACE, BadConfigException.Location.TOP_LEVEL, BadConfigException.Reason.INVALID_VALUE, peerType)
+                }
+                if (!wrapKey.matches(Regex("^[0-9a-fA-F]{64}$"))) {
+                    throw BadConfigException(BadConfigException.Section.INTERFACE, BadConfigException.Location.TOP_LEVEL, BadConfigException.Reason.INVALID_VALUE, wrapKey)
+                }
             }
 
             if (parsedStreamsPerCred !in 1..16) {
@@ -210,6 +238,7 @@ class TurnSettingsProxy : BaseObservable, Parcelable {
             peerType = peerType,
             streamsPerCred = parsedStreamsPerCred,
             watchdogTimeout = parsedWatchdogTimeout,
+            wrapKey = if (wrapEnabled) wrapKey.trim() else "",
         )
         if (enabled) {
             TurnSettings.validate(settings)

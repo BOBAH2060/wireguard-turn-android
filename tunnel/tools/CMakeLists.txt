@@ -17,10 +17,16 @@ add_executable(libwg.so ${WG_SOURCES})
 target_include_directories(libwg.so PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/wireguard-tools/src/uapi/linux/" "${CMAKE_CURRENT_SOURCE_DIR}/wireguard-tools/src/")
 target_compile_options(libwg.so PUBLIC -std=gnu11 -include ${CMAKE_CURRENT_SOURCE_DIR}/ndk-compat/compat.h -DRUNSTATEDIR=\"/data/data/${ANDROID_PACKAGE_NAME}/cache\")
 
+set(GO_EXECUTABLE go)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../.toolchain/go-root/go/bin/go.exe")
+    set(GO_EXECUTABLE "${CMAKE_CURRENT_SOURCE_DIR}/../../.toolchain/go-root/go/bin/go.exe")
+endif()
+
 add_custom_target(libwg-go.so WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/libwg-go" COMMENT "Building wireguard-go" VERBATIM COMMAND "${ANDROID_HOST_PREBUILTS}/bin/make"
     ANDROID_ARCH_NAME=${ANDROID_ARCH_NAME}
     ANDROID_PACKAGE_NAME=${ANDROID_PACKAGE_NAME}
     GRADLE_USER_HOME=${GRADLE_USER_HOME}
+    GO=${GO_EXECUTABLE}
     CC=${CMAKE_C_COMPILER}
     CFLAGS=${CMAKE_C_FLAGS}
     LDFLAGS=${CMAKE_SHARED_LINKER_FLAGS}

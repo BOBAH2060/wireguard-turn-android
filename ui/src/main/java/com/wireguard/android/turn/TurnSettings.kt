@@ -5,6 +5,7 @@
 package com.wireguard.android.turn
 
 import java.util.Locale
+import java.util.regex.Pattern
 
 /**
  * Per-tunnel TURN proxy configuration.
@@ -22,6 +23,7 @@ data class TurnSettings(
     val peerType: String = "proxy_v2",  // "proxy_v2", "proxy_v1", "wireguard"
     val streamsPerCred: Int = 4,
     val watchdogTimeout: Int = 0,
+    val wrapKey: String = "",
 ) {
     fun toComments(): List<String> {
         val lines = mutableListOf(
@@ -40,6 +42,10 @@ data class TurnSettings(
         if (turnIp.isNotBlank()) lines.add("#@wgt:TurnIP = $turnIp")
         if (turnPort > 0) lines.add("#@wgt:TurnPort = $turnPort")
         if (watchdogTimeout > 0) lines.add("#@wgt:WatchdogTimeout = $watchdogTimeout")
+        if (wrapKey.isNotBlank()) {
+            lines.add("#@wgt:Wrap = true")
+            lines.add("#@wgt:WrapKey = $wrapKey")
+        }
         return lines
     }
 
@@ -57,29 +63,35 @@ data class TurnSettings(
             var peerType: String? = null  // null means not set, will be determined from noDtls
             var streamsPerCred = 4
             var watchdogTimeout = 0
+            var wrapEnabled = false
+            var wrapKey = ""
             var noDtlsLegacy = false
             var foundAny = false
 
             for (line in comments) {
-                if (!line.startsWith("#@wgt:")) continue
+                val metadataLine = line.trim()
+                if (!metadataLine.startsWith("#@wgt:")) continue
                 foundAny = true
-                val parts = line.substring(6).split("=", limit = 2)
+                val parts = metadataLine.substring(6).split("=", limit = 2)
                 if (parts.size != 2) continue
                 val key = parts[0].trim().lowercase(Locale.ENGLISH)
-                val value = parts[1].trim()
+                val rawValue = parts[1].trim()
+                val value = cleanValue(key, rawValue)
 
                 when (key) {
-                    "enableturn" -> enabled = value.toBoolean()
-                    "useudp" -> useUdp = value.toBoolean()
+                    "enableturn" -> enabled = parseBoolean(value)
+                    "useudp" -> useUdp = parseBoolean(value)
                     "ipport" -> peer = value
-                    "vklink" -> vkLink = value
+                    "vklink" -> vkLink = rawValue
                     "mode" -> mode = value
                     "streamnum" -> streams = value.toIntOrNull() ?: 4
                     "localport" -> localPort = value.toIntOrNull() ?: 9000
                     "turnip" -> turnIp = value
                     "turnport" -> turnPort = value.toIntOrNull() ?: 0
                     "watchdogtimeout" -> watchdogTimeout = value.toIntOrNull() ?: 0
-                    "nodtls" -> noDtlsLegacy = value.toBoolean()  // legacy, for backward compatibility
+                    "wrap" -> wrapEnabled = parseBoolean(value)
+                    "wrapkey" -> wrapKey = value
+                    "nodtls" -> noDtlsLegacy = parseBoolean(value)  // legacy, for backward compatibility
                     "peertype" -> peerType = value
                     "streamspercred" -> streamsPerCred = value.toIntOrNull() ?: 4
                 }
@@ -90,7 +102,13 @@ data class TurnSettings(
                 peerType = if (noDtlsLegacy) "wireguard" else "proxy_v2"
             }
 
-            return if (foundAny) TurnSettings(enabled, peer, vkLink, mode, streams, useUdp, localPort, turnIp, turnPort, peerType, streamsPerCred, watchdogTimeout) else null
+            wrapKey = wrapKey.trim()
+            if (wrapKey.isNotBlank()) {
+                wrapEnabled = true
+            }
+            if (!wrapEnabled) wrapKey = ""
+
+            return if (foundAny) TurnSettings(enabled, peer, vkLink, mode, streams, useUdp, localPort, turnIp, turnPort, peerType, streamsPerCred, watchdogTimeout, wrapKey) else null
         }
 
         fun validate(settings: TurnSettings): TurnSettings {
@@ -112,11 +130,29 @@ data class TurnSettings(
             if (settings.watchdogTimeout > 0) {
                 require(settings.watchdogTimeout >= 5) { "Watchdog timeout must be at least 5 seconds or 0 to disable" }
             }
+            if (settings.wrapKey.isNotBlank()) {
+                require(settings.peerType != "wireguard") { "WRAP requires DTLS peer type" }
+                require(WRAP_KEY_PATTERN.matcher(settings.wrapKey).matches()) { "WRAP key must be 64 hex characters" }
+            }
 
             // Very small sanity check for host:port format; full validation is done later when applying.
             require(':' in settings.peer) { "TURN peer must be in host:port format" }
 
             return settings
+        }
+
+        private val WRAP_KEY_PATTERN = Pattern.compile("^[0-9a-fA-F]{64}$")
+
+        private fun cleanValue(key: String, value: String): String {
+            if (key == "vklink") return value
+            return value.replace(Regex("\\s+#.*$"), "").trim()
+        }
+
+        private fun parseBoolean(value: String): Boolean {
+            return when (value.lowercase(Locale.ENGLISH)) {
+                "true", "1", "yes", "on" -> true
+                else -> false
+            }
         }
     }
 }
