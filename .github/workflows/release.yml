@@ -51,31 +51,53 @@ jobs:
     - name: Generate release notes
       id: release_notes
       run: |
-        # Get the previous tag (sorted by creation date, excluding current tag)
         PREVIOUS_TAG=$(git tag --sort=-creatordate | grep -v "^${{ github.ref_name }}$" | head -n 1)
 
-        # Generate release notes from commits
         if [ -n "$PREVIOUS_TAG" ]; then
-          echo "Generating notes from $PREVIOUS_TAG to HEAD"
           COMMITS=$(git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD)
+          CHANGELOG_URL="https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${{ github.ref_name }}"
         else
-          echo "No previous tag found, using all commits"
           COMMITS=$(git log --pretty=format:"- %s (%h)")
+          CHANGELOG_URL="https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}"
         fi
 
-        # Write to file
         cat > RELEASE_NOTES.md << EOF
-        ## What's Changed
+        # WG Turn Wrap ${{ github.ref_name }}
+
+        Android WireGuard client fork with integrated TURN proxy transport and optional WRAP obfuscation.
+
+        ## APK
+
+        - App name: WG Turn Wrap
+        - Package: com.wgturn.android
+        - Version: ${{ steps.version.outputs.version }}
+        - Supported ABIs: arm64-v8a, armeabi-v7a, x86, x86_64
+
+        ## What's New
 
         $COMMITS
 
-        **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${{ github.ref_name }}
+        ## Install
+
+        Download the attached APK from this release and install it on Android.
+        If Android blocks installation, allow installation from the browser or file manager you are using.
+
+        ## WRAP Notes
+
+        WRAP requires the same 64-hex-character key on the Android client and on the compatible TURN proxy server.
+        A wrong key usually causes server-side AEAD authentication errors during the DTLS handshake.
+
+        ## Privacy
+
+        Do not publish real WireGuard private keys, preshared keys, TURN credentials, VK links, or WRAP keys in public logs or issues.
+
+        **Full changelog**: $CHANGELOG_URL
         EOF
 
         echo "release_notes_file=RELEASE_NOTES.md" >> $GITHUB_OUTPUT
 
     - name: Rename APK
-      run: mv ui/build/outputs/apk/release/ui-release.apk ui/build/outputs/apk/release/wg-turn-v${{ steps.version.outputs.version }}.apk
+      run: mv ui/build/outputs/apk/release/ui-release.apk ui/build/outputs/apk/release/WG-Turn-Wrap-v${{ steps.version.outputs.version }}.apk
 
     - name: Sign APK
       uses: r0adkll/sign-android-release@v1
@@ -91,7 +113,7 @@ jobs:
       id: create_release
       uses: softprops/action-gh-release@v2
       with:
-        #files: ui/build/outputs/apk/release/wg-turn-v${{ steps.version.outputs.version }}.apk
+        name: WG Turn Wrap ${{ github.ref_name }}
         files: ${{ steps.sign_app.outputs.signedReleaseFile }}
         draft: false
         prerelease: false
